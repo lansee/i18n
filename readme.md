@@ -1,8 +1,8 @@
 
-# Q音国际化解决方案
+# i18n国际化新解决方案
 
 # 安装依赖
-`tnpm i @tencent/qmfe-i18n`
+`npm i qmfe-i18n`
 
 # 两种业务模式 
   常见H5页面，node直出页面
@@ -180,7 +180,7 @@ export function autoI18nRender() {
 ### 4.tnpm转换逻辑 i18n_tnpm.js
 ```javascript
 
-import i18n_h5 from '@tencent/qmfe-i18n/H5/i18n.js';
+import i18n_h5 from 'qmfe-i18n/H5/i18n.js';
 import detail from './i18n_detail';
 
 let i18nModule = i18n_h5.initDetail(detail);
@@ -340,7 +340,7 @@ export default i18n;
 ### 4.tnpm转换逻辑 i18n_tnpm.js
 ```javascript
 
-import i18n_h5 from '@tencent/qmfe-i18n/Node/i18n.js';
+import i18n_h5 from 'qmfe-i18n/Node/i18n.js';
 import detail from './i18n_detail';
 
 let i18nModule = i18n_h5.initDetail(detail);
