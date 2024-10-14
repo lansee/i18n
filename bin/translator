@@ -1,0 +1,358 @@
+#!/usr/bin/env node
+
+var path = require("path");
+var fs = require("fs");
+var dirname = process.cwd();
+var Translator = require("../lib/translator").Translator;
+var config = {};
+
+// 工具函数
+
+var copy = function (from, to) {
+	if (fs.statSync(from).isDirectory()) {
+		if (!fs.existsSync(to)) {
+			fs.mkdirSync(to);
+		}
+
+		var files = fs.readdirSync(from);
+
+		if (files) {
+			files.forEach(function (filename) {
+				copy(path.join(from, filename), path.join(to, filename))
+			})
+		}
+	} else {
+		fs.writeFileSync(to, fs.readFileSync(from));
+		/*
+		var r = fs.createReadStream(from);
+		var w = fs.createWriteStream(to);
+		r.pipe(w);*/
+	}
+	return true;
+}
+
+var readDir = function (filename, resolve, exclude, excludes) {
+	var files = [],
+		stat = fs.statSync(filename)
+	if (filename) {
+		if (stat.isDirectory()) {
+			var filenames = fs.readdirSync(filename);
+			filenames = filenames.filter(function (item) {
+				if (exclude) {
+					if (exclude.test(item)) {
+						return false;
+					}
+				}
+				return true;
+			})
+			filenames.forEach(function (item) {
+				files = files.concat(readDir(path.join(filename, item), resolve, exclude, excludes))
+			})
+		} else if (stat.isFile()) {
+			if (resolve.indexOf(path.extname(filename)) > -1) {
+				if (excludes) {
+					if (!excludes.includes(path.basename(filename))) {
+						files.push(filename);
+					}
+				} else {
+					files.push(filename);
+				}
+			}
+		}
+	}
+	return files;
+}
+
+function writeFile(filePath, data) {
+	var dir = path.dirname(filePath);
+	var parts = dir.split(path.sep);
+	parts.reduce(function (previous, current) {
+		var preDir = path.join(previous, current);
+		if (!fs.existsSync(preDir)) {
+			fs.mkdirSync(preDir)
+		}
+		return preDir
+	});
+
+	fs.writeFileSync(filePath, data);
+}
+
+var main = function (config) {
+	var defaultConfigOptions = {
+		"src": "",
+		"dest": "",
+		"refs": "",
+		"rsplit": "<=>",
+		"placeholder": "(__)",
+		"includes": "",
+		"exclude": "^\\.|node_modules|express",
+		"excludes": "",
+		"dependencies": "^jquery",
+		"resolve": ".js",
+		"ignore": "^\t(.+)\t$",
+		"prefix": "_",
+		"copy": true,
+		"blank": "__BLANK__",
+		"global": "window",
+		"after": "^",
+		"nonce": "123456",
+		"nousage": true
+	}
+
+	for (var p in defaultConfigOptions) {
+		if (config[p] === undefined) {
+			config[p] = defaultConfigOptions[p];
+		}
+	}
+
+	config.__dirname = __dirname;
+	config.dirname = dirname;
+	config.includes = Array.isArray(config.includes) ? config.includes : [config.includes];
+	config.exclude = new RegExp(config.exclude);
+	config.excludes = Array.isArray(config.excludes) ? config.excludes : [config.excludes];
+	config.resolve = config.resolve.split(/[|,;]/);
+	config.dependencies = new RegExp(config.dependencies);
+	config.ignore = new RegExp(config.ignore);
+	config.after = new RegExp(config.after);
+	config.blank = new RegExp(config.blank, "g");
+
+	if (config.init) {
+		executeInit();
+	} else if (config.test) {
+		executeTest();
+	} else if (config.src && config.dest) {
+		config.src = path.join(config.src, "/");
+		config.dest = path.join(config.dest, "/");
+
+		if (config.copy) {
+			console.log(">>", "copyfile", config.src, config.dest);
+			copy(config.src, config.dest);
+		}
+
+		var files = initFiles(config);
+		if (config.scan) {
+			executeScan(config, files);
+		} else if (config.refs) {
+			executeTranslate(config, files);
+		} else {
+			console.log("error:", "请配置 refs")
+		}
+	} else {
+		console.log("error:", "请配置 src 和 dest")
+	}
+}
+
+// 为require和命令行分别提供执行入口
+if (require.main === module) {
+	var configFileName = "translator.config.json";
+	var configFilePath = path.join(dirname, configFileName);
+	if (fs.existsSync(configFilePath)) {
+		config = require(configFilePath);
+	}
+
+	process.argv.slice(2).forEach(function (item) {
+		var pairs = item.split('=')
+		var key = pairs[0];
+		if (pairs.length > 1) {
+			config[key] = pairs[1];
+		} else {
+			config[key] = true;
+		}
+	});
+	main(config);
+}
+
+function executeTranslate(config, sourceFiles) {
+	let dicts = initDicts(config);
+	if (dicts.length < 1) {
+		console.log("error:", "未发现词典文件，请创建后再执行");
+		return;
+	}
+
+	let collector = new Translator(config);
+	let translator = new Translator(config);
+
+	// 分析包含目录中的词条
+	let includeFilesDist = []
+	if (config.includes.length) {
+		let includeFiles = []
+    //console.log('---config.includes---', config.includes);
+		// 查询出包含目录中的文件
+		config.includes.forEach(function (include) {
+      
+			if (!!include) {
+				include = path.join(include, "/");
+				includeFiles = includeFiles.concat(readDir(include, config.resolve, config.exclude, config.excludes).map(function (filepath) {
+					return {
+						basename: path.basename(filepath),
+						extname: path.extname(filepath),
+						filepath: filepath
+					}
+				}))
+			}
+		})
+    //console.log('--includeFiles--', includeFiles.length, includeFiles);
+			
+		// 分析文件中的词条
+		includeFiles.forEach(function (sItem) {
+			let returnValue = []
+			let sourceCode = String(fs.readFileSync(sItem.filepath)).trim();
+			let retObj
+			let extname = sItem.extname.toLowerCase()
+
+			if (extname === '.ini') {
+				retObj = require('ini').parse(sourceCode)
+				returnValue = translator.scanIni(retObj);
+				returnValue.forEach(function (row) {
+					includeFilesDist.push(row.str);
+				})
+			} else {
+				returnValue = translator.scan(sourceCode, config.hash ? 'hash' : 'default');
+      }
+      //console.log('--returnValue--', returnValue.length, returnValue);
+      let distPath = sItem.filepath.replace(config.src, config.dest);
+      //console.log('--distPath---', distPath);
+      writeFile(distPath, returnValue[0]);
+      returnValue[1].forEach(function (row) {
+				includeFilesDist.push(row);
+			})
+		})
+		//console.log(includeFilesDist.length, includeFilesDist);return
+	}
+
+	// 所有语言的词条索引
+	const dictMap = {};
+
+	// 读取所有词条，并合并已扫描的词条到字典中
+	for (let dict of dicts) {
+		let dictText = String(fs.readFileSync(dict.filepath))
+		let dictInput = {}
+		let dictIgnoreKeys = {}
+
+    //console.log('---includeFilesDist---', includeFilesDist);
+		// 读取包含目录中的词条
+		includeFilesDist.forEach(function (v) {
+			if (v && !dictInput[v]) {
+				dictInput[v] = '';
+			}
+		});
+
+		// 读取忽略词条的配置
+		if (fs.existsSync(dict.ignore)) {
+			let ignoreText = String(fs.readFileSync(dict.ignore));
+			let ignoreLines = ignoreText.replace(/\r\n/g, '\n').split(/\n+/);
+			for (let line of ignoreLines.filter(Boolean)) {
+				dictIgnoreKeys[String(line.trim())] = true;
+			}
+		}
+
+		dict.dictInput = dictInput;
+		dict.dictIgnoreKeys = dictIgnoreKeys;
+		dictMap[dict.basename] = dict;
+	}
+
+	// 词典文件分析
+	for (let dict of dicts) {
+		let dictInput = dict.dictInput;
+		let dictIgnoreKeys = dict.dictIgnoreKeys;
+		let dictOutput = {}
+    console.log('dictInput---', dict.filepath);
+
+    dictText = `const TEXT = {
+      ${dict.filename.split('_')[0]}: {` + '\n';
+  
+		dictText += Object.keys(dictInput)
+			.filter(function (key) {
+				key = key.trim();
+				if (Boolean(key)) {
+					if (dictInput[key] || !dictIgnoreKeys[key]) {
+						return true;
+					} else {
+						return false;
+					}
+				} else {
+					return false;
+				}
+			})
+			.sort(function (a, b) {
+				// 没翻译的，排后面
+				if (+Boolean(dictInput[a]) ^ +Boolean(dictInput[b])) {
+					return +Boolean(dictInput[b]) - +Boolean(dictInput[a]);
+				}
+				// 被未使用的，排后面
+				else if (+Boolean(a in dictOutput) ^ +Boolean(b in dictOutput)) {
+					return +Boolean(b in dictOutput) - +Boolean(a in dictOutput);
+				} else {
+					return a < b ? -1 : 1;
+				}
+			})
+			.map(function (key) {
+				let line = '\'' + key.replace(/\n/g, '\\n').replace(/\r/g, '\\r') + '\':' + (dictInput[key] || '"",');
+				return line;
+			}).join('\n');
+    
+      dictText += `\n}\n};\n\rexport default TEXT;`
+  
+    dict.filepath = dict.filepath.replace(config.src, config.dest);
+		console.log(">>", "词条文件已更新：", dict.filepath, config.src, config.dest);
+    fs.writeFileSync(dict.filepath.replace(config.src, config.dest), dictText);
+
+	}
+
+	console.log('\n翻译完成');
+}
+
+function initFiles(config) {
+	return readDir(config.src, config.resolve, config.exclude, config.excludes).map(function (filepath) {
+		return {
+			basename: path.basename(filepath),
+			extname: path.extname(filepath),
+			filepath: filepath
+		}
+	})
+}
+
+function initDicts(config) {
+	const resolve = ['.js'];
+	return readDir(config.refs, resolve).map(function (filepath) {
+		return {
+			filename: path.basename(filepath),
+			basename: path.basename(filepath, resolve[0]),
+			extname: path.extname(filepath),
+			filepath: filepath,
+			ignore: filepath.replace(/(\.\w+)$/, "$1.ignore")
+		};
+	});
+}
+
+function executeScan(config, files) {
+	let translator = new Translator(config);
+	files.forEach(function (sItem) {
+		let sourceCode = String(fs.readFileSync(sItem.filepath));
+		let returnValue = translator.scan(sourceCode);
+		if (returnValue.length) {
+			console.log("\n\n" + sItem.filepath);
+		}
+		returnValue.forEach(function (row) {
+			let count = 5 - String(row.index).length;
+			console.log(row.index + " ".repeat(count) + " : ", row.str);
+		});
+	});
+}
+
+function executeTest() {
+	console.log(">>", path.join(dirname, 'test'));
+	copy(path.join(__dirname, '../', 'test'), path.join(dirname, 'test'));
+}
+
+function executeInit() {
+	let configTemp = {
+		src: "",
+		dest: "",
+		refs: ""
+	};
+	console.log(">>", path.join(dirname, configFileName));
+	fs.writeFileSync(path.join(dirname, configFileName), JSON.stringify(configTemp, null, 4));
+}
+
+module.exports = main;
